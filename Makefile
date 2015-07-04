@@ -1,3 +1,3 @@
-bitdown:
-	nasm -f elf main.asm -o flood.o
-	gcc errno.o flood.o
+all:
+	nasm -f elf main.asm -o micro-get.o
+	gcc micro-get.o
