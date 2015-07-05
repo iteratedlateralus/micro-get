@@ -1,22 +1,13 @@
 %include "args.asm"
-%include "defines.asm"
-%define MAX_EVENTS 64
+%include "socket.asm"
 
 SECTION .text
     global  main
-    extern  epoll_ctl
-    extern  epoll_create
-    extern  epoll_wait
     extern  exit
-    extern  fcntl
-    extern  get_errno
-    extern  gethostbyname
-    extern  htons
-    extern  inet_ntoa
     extern  printf
-    extern  select
     extern  snprintf
     extern  strlen
+    extern  get_argv_opt
 main:
     mov     dword[init_ebp],ebp
     mov     dword[init_esp],esp
@@ -28,54 +19,23 @@ main:
     cmp     ecx,2
     jl      .usage
 
-    push    1
-    push    ebp
-    call    getopt
-    mov     ebx,eax
-    mov     dword[target_host],ebx
+    mov     ebx,dword[ebp+12]
+    mov     ecx,dword[ebx+4]
+    mov     dword[target_host],ecx
 
-    push    2
-    push    ebp
-    call    getopt
-    mov     ebx,eax
-    mov     dword[target_uri],ebx
+    mov     ebx,dword[ebp+12]
+    mov     ecx,dword[ebx+8]
+    mov     dword[target_uri],ecx
 
-    ; TODO: break apart URL
-    ;push    host_buffer
-    ;push    uri_buffer
-    ;push    target_host
-    ;call    parseUrl
-    
     ;Grab the IP address of the host
     ;===============================
     push    dword[target_host]
-    call    gethostbyname
+    call    resolve_host
     cmp     eax,0
-    je      .gethostbyname_error
-    mov     ebx,eax
-    
-    push    dword[ebx]
-    push    printf_format_string   
-    call    printf
+    jle     .gethostbyname_error
+    mov     dword[target_host_nbo],eax
 
-    cld     ;clear direction flag
-    mov     esi,ebx
-    mov     edi,h_ent
-    mov     ecx,hostent.size / 4
-    rep     movsd
-
-    push    dword[h_ent + hostent.h_name]
-    push    printf_format_string
-    call    printf
-
-    ;extract the encoded addresses
-    ;=============================
-    mov     ebx,dword[h_ent + hostent.h_addr_list]
-    mov     ecx,dword[ebx]
-    mov     ebx,dword[ecx]
-    mov     dword[target_host_nbo],ebx
-
-    push    ebx
+    push    dword[target_host_nbo]
     call    inet_ntoa
 
     mov     dword[target_host_ip],eax
@@ -84,43 +44,20 @@ main:
     push    printf_format_string
     call    printf    
 
-    ;create a socket descriptor
-    ;==========================
-    mov     eax,SOCKET_SYSCALL  ;socket syscall
-    mov     ebx,SYS_SOCKET      ;socket()
+    call    create_socket
 
-    push    IPPROTO_IP          ;IPPROTO_IP
-    push    SOCK_STREAM         ;SOCK_STREAM
-    push    AF_INET             ;AF_INET
-    mov     ecx,esp
-    int     0x80
-    
     ;save the socket descriptor
     ;===========================
     mov     dword[socket],eax
     cmp     eax,0
     jl      .socket_error
-
     
-    ;Fill in the sockaddr_in structure
-    ;=================================
-    push    80
-    call    htons
-    mov     word[s_addr + sockaddr_in.sin_port],ax
-    mov     word[s_addr + sockaddr_in.sin_family],2
-    mov     esi,[target_host_nbo]
-    mov     dword[s_addr + sockaddr_in.sin_addr],esi
-    ;create the arguments on the stack
-    ;=================================
-    push    sockaddr_in.size
-    push    s_addr
-    push    dword[socket]
-    mov     ecx,esp
     ;connect
     ;=======
-    mov     eax,SOCKET_SYSCALL
-    mov     ebx,SYS_CONNECT
-    int     0x80
+    push    dword[target_host_nbo]
+    push    80
+    push    dword[socket]
+    call    connect_to_host
     cmp     eax,0
     jl      .connect_error
     
@@ -128,49 +65,21 @@ main:
     ;we are now connected. 
     ;=====================
 
-    ;make the socket non-blocking
-    ;============================
-    push    0
-    push    F_GETFL
+    ;make socket non-blocking
+    ;========================
     push    dword[socket]
-    call    fcntl
-    cmp     eax,-1
-    je      .fcntl_error
-    or      eax,O_NONBLOCK
-    push    eax
-    push    F_SETFL
-    push    dword[socket]
-    call    fcntl
-    cmp     eax,-1
-    je      .fcntl_error
+    call    make_socket_nonblocking
+    cmp     eax,0
+    jl      .make_socket_nonblocking_error
+    
 
     ;setup an epoll descriptor
     ;========================
-    push    1
-    call    epoll_create
-    cmp     eax,-1
-    je      .epoll_create_error 
-    mov     dword[epoll_event_handle],eax
-    mov     eax,dword[socket]
-    mov     dword[e_event + epoll_event.fd],eax
-    mov     ebx,EPOLLIN
-    mov     ecx,EPOLLET
-    or      ebx,ecx
-    mov     dword[e_event + epoll_event.events],ebx
-
-
-    ;add our socket to epolls watchlist
-    ;==================================
-    push    e_event
     push    dword[socket]
-    push    EPOLL_CTL_ADD
-    push    dword[epoll_event_handle]
-    call    epoll_ctl
-    cmp     eax,-1
-    je      .epoll_ctl_error
-    
-    mov     dword[ctr],0
-    
+    call    register_epoll
+    cmp     eax,0
+    jl      .register_epoll_error
+    mov     dword[epoll_event_handle],eax
 
     ;create a buffer on the stack to store our send buffer
     ;=====================================================
@@ -212,14 +121,10 @@ main:
     ;send our GET request
     ;====================
     mov     dword[target_send_buffer],esp
-    mov     eax,SOCKET_SYSCALL
-    mov     ebx,SYS_SEND
-    push    0
-    push    edi
-    push    edx
-    push    dword[socket]
-    mov     ecx,esp
-    int     0x80
+    push    edi                         ;length
+    push    dword[target_send_buffer]   ;buffer
+    push    dword[socket]               ;socket descriptor
+    call    send_data
     cmp     eax,0
     jl      .send_error
 
@@ -251,14 +156,10 @@ main:
     jmp     .clear_buffer_loop
     .end_clear_buffer_loop:
 
-    mov     eax,SOCKET_SYSCALL
-    mov     ebx,SYS_RECV
-    push    0
     push    dword[readbuff_size]
     push    dword[readbuff]
     push    dword[socket]
-    mov     ecx,esp
-    int     0x80
+    call    recv_data
     push    eax
     
     cmp     eax,0
@@ -311,6 +212,16 @@ main:
     push    printf_format_string
     call    printf
     jmp     .leaveMain
+.make_socket_nonblocking_error:
+    push    error_make_socket_nonblocking
+    push    printf_format_string
+    call    printf
+    jmp     .leaveMain
+.register_epoll_error:
+    push    error_register_epoll
+    push    printf_format_string
+    call    printf
+    jmp     .leaveMain
 .socket_error:
     push    error_socket
     push    printf_format_string
@@ -354,54 +265,6 @@ main:
 
 
 
-;struct timeval {
-;    long    tv_sec;         /* seconds */
-;    long    tv_usec;        /* microseconds */
-;};
-STRUC timeval
-.tv_sec: RESD 1
-.tv_usec RESD 1
-.size:
-ENDSTRUC
-
-STRUC epoll_event
-.events: RESD 1
-.fd: RESD 1
-.u32: RESD 1
-.u64: RESQ 1
-.size:
-ENDSTRUC
-
-STRUC fd_set
-.fd_count: RESD 1
-.fd_array: RESB 64
-.size:
-ENDSTRUC
-
-
-STRUC hostent
-.h_name: RESD 1
-.h_aliases: RESD 1
-.h_addrtype: RESD 1
-.h_length: RESD 1
-.h_addr_list: RESD 1
-.size:
-
-;struct sockaddr_in {
-;    short            sin_family;   // e.g. AF_INET, AF_INET6
-;    unsigned short   sin_port;     // e.g. htons(3490)
-;    struct in_addr   sin_addr;     // see struct in_addr, below
-;    char             sin_zero[8];  // zero this if you want to
-;};
-
-STRUC sockaddr_in
-.sin_family: RESB 2
-.sin_port: RESB 2
-.sin_addr: RESD 1
-.sin_zero: RESB 8
-.size:
-ENDSTRUC
-
 SECTION .data
 connect_format_string: db '%s:80',0
 ctr: dd 0 
@@ -411,7 +274,9 @@ error_epoll_create: db 'error: epoll_create()',0
 error_epoll_ctl: db 'error: epoll_ctl()',0
 error_fcntl: db 'error: fcntl()',0
 error_gethostbyname: db 'error: gethostbyname()',0
+error_make_socket_nonblocking: db 'error: make_socket_nonblocking()',0
 error_recv: db 'error: recv()',0
+error_register_epoll: db 'error: register_epoll()',0
 error_select: db 'error: select()',0
 error_send: db 'error: send()',0
 error_socket: db 'error: socket()',0
@@ -441,19 +306,3 @@ usage: db 'Usage: ./a.out <hostname> <uri>',0xa,0xd,
        db 'Example: ./a.out google.com /index.html',0
 
 SECTION .bss
-e_event: resb epoll_event.size
-e_event_l: EQU ($ - e_event) / epoll_event.size
-
-e_event_list: resb epoll_event.size * MAX_EVENTS
-
-f_set: resb fd_set.size
-f_set_l: EQU ($ - f_set) / fd_set.size
-
-h_ent: resb hostent.size
-h_ent_l: EQU ($ - h_ent) / hostent.size
-
-s_addr: resb sockaddr_in.size
-s_addr_l: EQU ($ - s_addr) / sockaddr_in.size
-
-t_val: resb timeval.size
-t_val_l: EQU ($ - t_val) / timeval.size

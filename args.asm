@@ -1,12 +1,12 @@
 SECTION .text
     global  getopt
     extern  printf
-; getopt should be called ASAP when entering the main
+; get_argv_opt should be called ASAP when entering the main
 ; function so that the ebp register can be searched
 ; 
 ; 1st argument: ebp
 ; 2nd argument: index to retrieve
-getopt:
+get_arg_opt:
     push    ebp
     mov     ebp,esp
     mov     eax,dword[ebp+8]    ; first argument (ebp)
