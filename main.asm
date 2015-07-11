@@ -1,13 +1,15 @@
 %include "args.asm"
 %include "socket.asm"
+%include "url.asm"
 
 SECTION .text
     global  main
+    extern  atoi
     extern  exit
+    extern  get_argv_opt
     extern  printf
     extern  snprintf
     extern  strlen
-    extern  get_argv_opt
 main:
     mov     dword[init_ebp],ebp
     mov     dword[init_esp],esp
@@ -23,26 +25,88 @@ main:
     mov     ecx,dword[ebx+4]
     mov     dword[target_host],ecx
 
-    mov     ebx,dword[ebp+12]
-    mov     ecx,dword[ebx+8]
-    mov     dword[target_uri],ecx
+    ;zero out the main_url_positions struct
+    ;======================================
+    mov     edi,main_url_positions
+    mov     ecx,url_positions.size
+    mov     al,0
+    cld 
+    rep     stosb
 
+    push    main_url_positions
+    push    dword[target_host]
+    call    explode_url
+    add     esp,8
+
+    ;extract the host name
+    ;=====================
+    mov     eax,dword[main_url_positions + url_positions.host_name_start]
+    mov     esi,eax
+    mov     ebx,dword[main_url_positions + url_positions.host_name_end]
+    sub     eax,ebx
+    xor     eax,-1
+    inc     eax
+    sub     esp,eax    
+    mov     edi,esp
+    mov     ecx,eax
+    cld
+    rep     movsb
+    sub     edi,eax
+    mov     dword[target_host],edi
+    sub     esp,4
+
+    ;extract the uri    
+    ;===============
+    mov     eax,dword[main_url_positions + url_positions.uri_start]
+    cmp     eax,0
+    je      .default_to_index
+    mov     dword[target_uri],eax
+    jmp     .extract_port
+.default_to_index:
+    mov     dword[target_uri],"/"
+
+.extract_port:
+    ;see if there is a port specified
+    ;================================
+    mov     eax,dword[main_url_positions + url_positions.port_start]
+    cmp     eax,0
+    je      .default_port_specified
+    mov     esi,eax
+    mov     ebx,dword[main_url_positions + url_positions.port_end]
+    sub     eax,ebx
+    xor     eax,-1
+    inc     eax
+    sub     esp,eax
+    mov     edi,esp
+    mov     byte[edi+eax],0 
+    cld
+    mov     ecx,eax
+    rep     movsb
+    mov     dword[target_port_string],esp
+    push    dword[target_port_string]
+    call    atoi
+    add     esp,4
+    mov     dword[target_port],eax
+
+    jmp     .get_host_ip
+
+.default_port_specified:
+    mov     dword[target_port],80
+
+
+.get_host_ip:
     ;Grab the IP address of the host
     ;===============================
     push    dword[target_host]
     call    resolve_host
     cmp     eax,0
-    jle     .gethostbyname_error
+    je      .gethostbyname_error
     mov     dword[target_host_nbo],eax
 
     push    dword[target_host_nbo]
     call    inet_ntoa
 
     mov     dword[target_host_ip],eax
-
-    push    eax
-    push    printf_format_string
-    call    printf    
 
     call    create_socket
 
@@ -55,7 +119,7 @@ main:
     ;connect
     ;=======
     push    dword[target_host_nbo]
-    push    80
+    push    dword[target_port]
     push    dword[socket]
     call    connect_to_host
     cmp     eax,0
@@ -296,13 +360,15 @@ socket_ptr: dd 0
 target_host: dd 0
 target_host_ip: dd 0
 target_host_nbo: dd 0
+target_port: dd 0
+target_port_string: dd 0 
 target_send_buffer: dd 0
 target_uri: dd 0
 snprintf_get_string: db 'GET %s HTTP/1.1',0xa,0xd,
                     db  'Host: %s',0xa,0xd,
                     db  'Connection: cose',0xa,0xd,
                     db 0xa,0xd,0
-usage: db 'Usage: ./a.out <hostname> <uri>',0xa,0xd,
-       db 'Example: ./a.out google.com /index.html',0
+usage: db 'Usage: ./a.out <url>',0xa,0xd,
+       db 'Example: ./a.out http://www.google.com/index.html',0
 
 SECTION .bss
